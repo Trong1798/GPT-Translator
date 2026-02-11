@@ -1,11 +1,12 @@
 
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { SubtitleEntry, ProcessingStatus, FileTask } from './types';
 import { parseSRT, exportToSRT } from './utils/srtParser';
 import { translateSubtitleBatch } from './services/openaiService';
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<FileTask[]>([]);
+  
   // 1. Khởi tạo State từ LocalStorage nếu có
   const [apiKey, setApiKey] = useState(() => {
     return localStorage.getItem('gemini_api_key') || '';
@@ -26,9 +27,6 @@ const App: React.FC = () => {
     localStorage.removeItem('gemini_api_key');
     alert('Đã xóa API Key khỏi trình duyệt!');
   };
-  const [isGlobalProcessing, setIsGlobalProcessing] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const processFiles = useCallback((files: FileList | File[]) => {
     const newTasks: Promise<FileTask>[] = Array.from(files).map((file: File) => {
@@ -56,8 +54,7 @@ const App: React.FC = () => {
               processedSubs: [],
               prompt: '',
               status: ProcessingStatus.ERROR,
-              progress: 0,
-              error: err.message || 'Lỗi định dạng'
+              progress: 0
             });
           }
         };
@@ -65,8 +62,8 @@ const App: React.FC = () => {
       });
     });
 
-    Promise.all(newTasks).then((resolvedTasks) => {
-      setTasks((prev) => [...prev, ...resolvedTasks]);
+    Promise.all(newTasks).then(tasks => {
+      setTasks(prev => [...prev, ...tasks]);
     });
   }, []);
 
@@ -192,6 +189,32 @@ const App: React.FC = () => {
                 OpenAI SRT
                 <span className="text-[10px] bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full font-black border border-emerald-100">GPT-4O MINI</span>
               </h1>
+              {/* Khu vực nhập API Key */}
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-8">
+          <label className="block text-sm font-medium text-slate-700 mb-2">
+            Google Gemini API Key (Sẽ được lưu an toàn trên trình duyệt của bạn)
+          </label>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Dán API Key của bạn vào đây..."
+              className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+            />
+            {apiKey && (
+              <button
+                onClick={handleClearKey}
+                className="px-4 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+              >
+                Xóa Key
+              </button>
+            )}
+          </div>
+          <p className="mt-2 text-xs text-slate-500">
+            * Lưu ý: Key chỉ lưu tại LocalStorage trên máy bạn, không gửi về server.
+          </p>
+        </div>
               <p className="text-slate-500 text-sm mt-1 font-medium italic">"Dịch đủ, dịch đúng, không bỏ sót dòng"</p>
             </div>
 
