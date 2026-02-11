@@ -6,7 +6,26 @@ import { translateSubtitleBatch } from './services/openaiService';
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<FileTask[]>([]);
-  const [apiKey, setApiKey] = useState('');
+  // 1. Khởi tạo State từ LocalStorage nếu có
+  const [apiKey, setApiKey] = useState(() => {
+    return localStorage.getItem('gemini_api_key') || '';
+  });
+
+  const [isGlobalProcessing, setIsGlobalProcessing] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 2. Tự động lưu Key vào LocalStorage mỗi khi apiKey thay đổi
+  useEffect(() => {
+    localStorage.setItem('gemini_api_key', apiKey);
+  }, [apiKey]);
+
+  // Hàm xóa Key nhanh
+  const handleClearKey = () => {
+    setApiKey('');
+    localStorage.removeItem('gemini_api_key');
+    alert('Đã xóa API Key khỏi trình duyệt!');
+  };
   const [isGlobalProcessing, setIsGlobalProcessing] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -208,7 +227,7 @@ const App: React.FC = () => {
               placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
               className="flex-1 bg-white border border-emerald-100 px-5 py-3 rounded-2xl text-sm focus:ring-4 focus:ring-emerald-500/10 outline-none font-mono tracking-wider transition-all"
               value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
+              onChange={(e) => handleApiKeyChange(e.target.value)}
             />
             {apiKey.length > 5 && (
               <div className="flex items-center gap-2 px-4 py-2 bg-emerald-100 text-emerald-700 rounded-xl text-[10px] font-black border border-emerald-200">
