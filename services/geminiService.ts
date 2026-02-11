@@ -5,7 +5,8 @@ import { SubtitleEntry } from "../types";
 export async function translateSubtitleBatchGemini(
   subtitles: SubtitleEntry[],
   customPrompt: string,
-  apiKey: string
+  apiKey: string,
+  modelName: string = "gemini-3-flash-preview"
 ): Promise<{ id: number; translatedText: string }[]> {
   
   const ai = new GoogleGenAI({ apiKey });
@@ -14,50 +15,46 @@ export async function translateSubtitleBatchGemini(
 Your task is to translate subtitle entries into Vietnamese.
 
 STRICT STRUCTURAL RULES:
-1. NO SKIPPING: Translate and include EVERY SINGLE entry. Output count MUST be exactly ${subtitles.length}.
-2. ID MATCHING: Keep the original IDs.
-3. FORMAT: Return a JSON object with a "translations" key.
+1. NO SKIPPING: Translate and include EVERY SINGLE entry provided.
+2. ID MATCHING: You must return the EXACT same IDs as provided.
+3. OUTPUT FORMAT: You MUST return a valid JSON object with a "translations" key.
 
-USER STYLE: ${customPrompt || "Natural Vietnamese."}`;
+USER STYLE & CONTEXT: ${customPrompt || "Dịch một cách tự nhiên, trôi chảy, phù hợp ngữ cảnh Việt Nam."}`;
 
   const inputData = subtitles.map(s => ({ id: s.id, text: s.text }));
 
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-lite-latest",
-      contents: `Translate these entries: ${JSON.stringify(inputData)}`,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            translations: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.NUMBER },
-                  translatedText: { type: Type.STRING }
-                },
-                required: ["id", "translatedText"]
-              }
+  const response = await ai.models.generateContent({
+    model: modelName,
+    contents: `Translate the following subtitle batch: ${JSON.stringify(inputData)}`,
+    config: {
+      systemInstruction,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          translations: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.NUMBER },
+                translatedText: { type: Type.STRING }
+              },
+              required: ["id", "translatedText"]
             }
-          },
-          required: ["translations"]
-        }
+          }
+        },
+        required: ["translations"]
       }
-    });
-
-    const content = JSON.parse(response.text || "{}");
-    
-    if (content.translations && Array.isArray(content.translations)) {
-      return content.translations;
     }
-    
-    throw new Error("Gemini returned invalid structure.");
-  } catch (error: any) {
-    console.error("Gemini Error:", error);
-    throw new Error(error.message || "Failed to connect to Gemini.");
+  });
+
+  const responseText = response.text;
+  if (!responseText) throw new Error("Empty response from Gemini");
+  const content = JSON.parse(responseText);
+  
+  if (content.translations && Array.isArray(content.translations)) {
+    return content.translations;
   }
+  throw new Error("Invalid structure from Gemini");
 }
