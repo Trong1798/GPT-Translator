@@ -1,10 +1,4 @@
 
-Đừng lo lắng, việc code bị lỗi khi dán đè là do các ký hiệu @@ và + - (định dạng file diff) lọt vào làm sai cú pháp JavaScript.
-
-Dưới đây là toàn bộ mã nguồn file App.tsx đã được mình dọn dẹp sạch sẽ, tối ưu giao diện "Clean" với tab Cấu hình API ẩn/hiện và giữ nguyên logic xử lý file của bạn. Bạn chỉ cần xóa hết code cũ trong file App.tsx và dán toàn bộ đoạn này vào là xong:
-
-TypeScript
-
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { SubtitleEntry, ProcessingStatus, FileTask } from './types';
 import { parseSRT, exportToSRT } from './utils/srtParser';
@@ -12,25 +6,23 @@ import { translateSubtitleBatch } from './services/openaiService';
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<FileTask[]>([]);
+  // Lấy key từ localStorage nếu có
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('openai_api_key') || '');
   const [isGlobalProcessing, setIsGlobalProcessing] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  const [showApiSettings, setShowApiSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 1. Khởi tạo State từ LocalStorage nếu có
-  const [apiKey, setApiKey] = useState(() => {
-    return localStorage.getItem('gemini_api_key') || '';
-  });
-
-  // 2. Tự động lưu Key khi thay đổi
+  // Tự động lưu key mỗi khi thay đổi
   useEffect(() => {
-    localStorage.setItem('gemini_api_key', apiKey);
+    localStorage.setItem('openai_api_key', apiKey);
   }, [apiKey]);
 
   const handleClearKey = () => {
-    setApiKey('');
-    localStorage.removeItem('gemini_api_key');
-    alert('Đã xóa API Key khỏi trình duyệt!');
+    if (window.confirm("Bạn có chắc chắn muốn xóa Key đã lưu?")) {
+      setApiKey('');
+      localStorage.removeItem('openai_api_key');
+    }
   };
 
   const processFiles = useCallback((files: FileList | File[]) => {
@@ -41,14 +33,15 @@ const App: React.FC = () => {
           const content = event.target?.result as string;
           try {
             const parsed = parseSRT(content);
+            if (parsed.length === 0) throw new Error("File không có dữ liệu phụ đề");
             resolve({
               id: Math.random().toString(36).substring(7),
               fileName: file.name,
               originalSubs: parsed,
               processedSubs: [],
+              prompt: '',
               status: ProcessingStatus.IDLE,
-              progress: 0,
-              prompt: ''
+              progress: 0
             });
           } catch (err: any) {
             resolve({
@@ -56,9 +49,10 @@ const App: React.FC = () => {
               fileName: file.name,
               originalSubs: [],
               processedSubs: [],
+              prompt: '',
               status: ProcessingStatus.ERROR,
               progress: 0,
-              prompt: ''
+              error: err.message || 'Lỗi định dạng'
             });
           }
         };
@@ -72,148 +66,230 @@ const App: React.FC = () => {
   }, []);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) processFiles(e.target.files);
+    const files = e.target.files;
+    if (!files) return;
+    processFiles(files);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Giả định hàm processQueue để nút "Bắt đầu dịch" hoạt động
-  const processQueue = () => {
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      processFiles(files);
+    }
+  };
+
+  const updateTask = (id: string, updates: Partial<FileTask>) => {
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...updates } : t)));
+  };
+
+  const processSingleTask = async (taskId: string) => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task || task.originalSubs.length === 0) return;
+
     if (!apiKey) {
-      alert("Vui lòng nhập API Key!");
-      setShowApiSettings(true);
+      updateTask(task.id, { status: ProcessingStatus.ERROR, error: "Thiếu API Key. Vui lòng cấu hình trong mục 'Cài đặt API'." });
+      setShowSettings(true); // Tự động mở settings nếu thiếu key
       return;
     }
+
+    updateTask(task.id, { status: ProcessingStatus.PROCESSING, progress: 2, error: undefined });
+
+    try {
+      const results: SubtitleEntry[] = task.originalSubs.map(s => ({ ...s }));
+      const totalEntries = task.originalSubs.length;
+      
+      const BATCH_SIZE = 40;
+      const batches = [];
+      for (let i = 0; i < totalEntries; i += BATCH_SIZE) {
+        batches.push(task.originalSubs.slice(i, i + BATCH_SIZE));
+      }
+
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        const translatedBatch = await translateSubtitleBatch(batch, task.prompt, apiKey);
+        
+        translatedBatch.forEach((tSub) => {
+          const index = results.findIndex(r => r.id === tSub.id);
+          if (index !== -1) {
+            results[index].text = tSub.translatedText;
+          }
+        });
+        
+        const currentProgress = Math.floor(((i + 1) / batches.length) * 100);
+        updateTask(task.id, { progress: currentProgress, processedSubs: [...results] });
+      }
+
+      updateTask(task.id, { 
+        processedSubs: results, 
+        status: ProcessingStatus.COMPLETED, 
+        progress: 100 
+      });
+    } catch (err: any) {
+      updateTask(task.id, { status: ProcessingStatus.ERROR, error: err.message });
+      throw err;
+    }
+  };
+
+  const processQueue = async () => {
+    if (isGlobalProcessing) return;
+    if (!apiKey) {
+      setShowSettings(true);
+      alert("Vui lòng nhập API Key trong phần cài đặt trước!");
+      return;
+    }
+    
     setIsGlobalProcessing(true);
-    // Logic dịch thuật của bạn sẽ chạy ở đây
+    const pendingTasks = tasks.filter(t => t.status !== ProcessingStatus.COMPLETED);
+    for (const task of pendingTasks) {
+      try {
+        await processSingleTask(task.id);
+      } catch (err) {
+        console.error(`Task ${task.fileName} failed.`);
+      }
+    }
+    setIsGlobalProcessing(false);
+  };
+
+  const downloadTask = (task: FileTask) => {
+    const content = exportToSRT(task.processedSubs);
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Translated_${task.fileName}`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] p-4 md:p-8 font-sans">
-      <div className="max-w-3xl mx-auto">
+    <div className="min-h-screen bg-[#f9fafb] flex flex-col items-center py-8 px-4 font-sans selection:bg-emerald-100">
+      <div className="max-w-4xl w-full space-y-6">
         
-        {/* HEADER & ACTIONS */}
-        <header className="flex flex-col md:flex-row justify-between items-center mb-8 gap-4 text-center md:text-left">
-          <div>
-            <h1 className="text-3xl font-black text-emerald-600 flex items-center gap-2 justify-center md:justify-start">
-              OpenAI SRT
-              <span className="text-[10px] bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full border border-emerald-100 uppercase">GPT-4O MINI</span>
-            </h1>
-            <p className="text-slate-500 text-sm mt-1 font-medium italic">"Dịch đủ, dịch đúng, không bỏ sót dòng"</p>
+        {/* Main Header */}
+        <div className="bg-white p-6 md:p-10 rounded-[2.5rem] shadow-[0_4px_20px_rgba(0,0,0,0.02)] border border-slate-100 relative overflow-hidden">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-6 relative z-10">
+            <div className="text-center md:text-left">
+              <h1 className="text-4xl font-black text-slate-900 tracking-tighter flex items-center justify-center md:justify-start gap-3">
+                <span className="text-emerald-600">OpenAI</span> SRT
+              </h1>
+              <p className="text-slate-400 text-sm mt-1 font-medium">Công cụ dịch phụ đề chuyên nghiệp</p>
+            </div>
+
+            <div className="flex flex-wrap justify-center gap-3">
+              <button
+                onClick={() => setShowSettings(!showSettings)}
+                className={`p-3 rounded-2xl transition-all border ${showSettings ? 'bg-emerald-50 border-emerald-200 text-emerald-600' : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100'}`}
+                title="Cài đặt API"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="px-6 py-3 bg-white text-slate-700 rounded-2xl text-sm font-bold hover:bg-slate-50 transition-all flex items-center gap-2 border border-slate-200 shadow-sm"
+              >
+                Thêm file
+              </button>
+              <button
+                onClick={processQueue}
+                disabled={isGlobalProcessing || tasks.length === 0}
+                className="px-10 py-3 bg-emerald-600 text-white rounded-2xl text-sm font-bold shadow-lg shadow-emerald-100 hover:bg-emerald-700 disabled:opacity-50 transition-all transform hover:-translate-y-0.5"
+              >
+                {isGlobalProcessing ? 'Đang chạy...' : 'Bắt đầu dịch'}
+              </button>
+              <input ref={fileInputRef} type="file" multiple accept=".srt,.txt" className="hidden" onChange={handleFileUpload} />
+            </div>
           </div>
 
-          <div className="flex gap-3">
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="px-6 py-3 bg-white text-slate-600 rounded-2xl text-sm font-bold hover:bg-slate-50 transition-all flex items-center gap-2 border border-slate-200 shadow-sm"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
-              Thêm file
-            </button>
-            <button
-              onClick={processQueue}
-              disabled={isGlobalProcessing || tasks.length === 0}
-              className="px-8 py-3 bg-emerald-600 text-white rounded-2xl text-sm font-bold shadow-lg shadow-emerald-100 hover:bg-emerald-700 disabled:bg-slate-300 transition-all transform hover:-translate-y-0.5"
-            >
-              {isGlobalProcessing ? 'Đang dịch thuật...' : 'Bắt đầu dịch'}
-            </button>
-            <input ref={fileInputRef} type="file" multiple accept=".srt,.txt" className="hidden" onChange={handleFileUpload} />
-          </div>
-        </header>
-
-        {/* OPTIONAL API KEY TAB */}
-        <div className="mb-8">
-          <button 
-            onClick={() => setShowApiSettings(!showApiSettings)}
-            className="text-[11px] font-black text-slate-400 hover:text-emerald-600 flex items-center gap-2 uppercase tracking-widest transition-all"
-          >
-            {showApiSettings ? '▼' : '▶'} Cấu hình API (Tùy chỉnh)
-          </button>
-          
-          {showApiSettings && (
-            <div className="mt-4 p-6 bg-white rounded-[2rem] border border-slate-100 shadow-xl shadow-slate-200/50 animate-in fade-in slide-in-from-top-4">
-              <label className="block text-[11px] font-black text-slate-400 mb-3 uppercase tracking-widest">
-                Google Gemini / OpenAI API Key
-              </label>
-              <div className="flex gap-3">
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-                  className="flex-1 px-5 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-4 focus:ring-emerald-500/10 outline-none font-mono transition-all"
-                />
-                {apiKey && (
+          {/* Optional API Key Section (Collapsible) */}
+          {showSettings && (
+            <div className="mt-8 pt-8 border-t border-slate-100 animate-in fade-in slide-in-from-top-4 duration-300">
+              <div className="flex flex-col gap-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em]">Cấu hình OpenAI API</h3>
+                  <button onClick={() => setShowSettings(false)} className="text-slate-300 hover:text-slate-500">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+                </div>
+                <div className="flex flex-col md:flex-row items-stretch gap-3">
+                  <div className="relative flex-1">
+                    <input
+                      type="password"
+                      placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+                      className="w-full bg-slate-50 border border-slate-200 px-5 py-3.5 rounded-2xl text-sm focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-200 outline-none font-mono tracking-widest transition-all"
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                    />
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                       {apiKey && <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span>}
+                    </div>
+                  </div>
                   <button
                     onClick={handleClearKey}
-                    className="px-4 py-2 text-xs font-black text-red-400 hover:text-red-600 uppercase tracking-tighter"
+                    className="px-6 py-3.5 bg-red-50 text-red-600 rounded-2xl text-sm font-bold hover:bg-red-100 transition-all border border-red-100 flex items-center justify-center gap-2 whitespace-nowrap"
                   >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                     Xóa Key
                   </button>
-                )}
+                </div>
+                <p className="text-[10px] text-slate-400 font-medium">Key của bạn sẽ được lưu an toàn trong LocalStorage của trình duyệt này.</p>
               </div>
-              <p className="mt-3 text-[10px] text-slate-400 italic font-medium">
-                * Key lưu tại LocalStorage máy bạn, không gửi về server.
-              </p>
             </div>
           )}
         </div>
 
-      {/* Khu vực kéo thả (Giữ nguyên) */}
-      <div 
-        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-        onDragLeave={() => setIsDragging(false)}
-        onDrop={(e) => { e.preventDefault(); setIsDragging(false); processFiles(e.dataTransfer.files); }}
-        className={`relative border-2 border-dashed rounded-3xl p-12 transition-all flex flex-col items-center justify-center min-h-[300px] ${
-          isDragging ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200 bg-white'
-        }`}
-      >
-        <div className="w-16 h-16 bg-slate-50 rounded-2xl flex items-center justify-center mb-4">
-          <svg className="w-8 h-8 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-          </svg>
-        </div>
-        <p className="text-slate-600 font-bold mb-1">Kéo thả file .srt hoặc .txt vào đây</p>
-        <p className="text-slate-400 text-xs text-center max-w-[250px]">
-          Model GPT-4o mini được cấu hình dịch 40 dòng/lượt
-        </p>
-        <input type="file" ref={fileInputRef} onChange={(e) => e.target.files && processFiles(e.target.files)} className="hidden" multiple accept=".srt,.txt" />
-      </div>
-        </header>
-
         {/* Task List / Drop Zone */}
         <div 
-          className={`space-y-4 min-h-[400px] rounded-[3rem] transition-all duration-500 ${isDragging ? 'bg-emerald-50/50 ring-4 ring-emerald-400 ring-dashed scale-[0.98]' : ''}`}
+          className={`space-y-4 min-h-[450px] rounded-[3rem] transition-all duration-500 ${isDragging ? 'bg-emerald-50/40 ring-4 ring-emerald-400/20 ring-dashed scale-[0.99]' : ''}`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
           {tasks.length === 0 ? (
             <div 
-              className={`bg-white/70 backdrop-blur-sm border-2 border-dashed rounded-[3rem] p-24 text-center transition-all duration-500 flex flex-col items-center gap-6 ${isDragging ? 'border-emerald-500 bg-white/90' : 'border-slate-200'}`}
+              className={`bg-white/40 backdrop-blur-sm border-2 border-dashed rounded-[3rem] p-32 text-center transition-all duration-500 flex flex-col items-center gap-6 ${isDragging ? 'border-emerald-500 bg-white/80 translate-y-2' : 'border-slate-200'}`}
             >
-              <div className={`w-20 h-20 rounded-3xl flex items-center justify-center transition-all shadow-xl ${isDragging ? 'bg-emerald-600 text-white rotate-6' : 'bg-slate-100 text-slate-400'}`}>
-                <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div className={`w-24 h-24 rounded-[2rem] flex items-center justify-center transition-all shadow-xl ${isDragging ? 'bg-emerald-600 text-white rotate-12 scale-110' : 'bg-white text-slate-300 border border-slate-100'}`}>
+                <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                 </svg>
               </div>
               <div>
-                <p className={`text-xl font-black transition-colors ${isDragging ? 'text-emerald-700' : 'text-slate-400'}`}>
-                  {isDragging ? 'Thả để nạp file!' : 'Kéo thả file .srt hoặc .txt vào đây'}
+                <p className={`text-2xl font-black transition-colors ${isDragging ? 'text-emerald-700' : 'text-slate-400'}`}>
+                  {isDragging ? 'Thả để bắt đầu dịch' : 'Kéo thả file .srt vào đây'}
                 </p>
-                <p className="text-slate-400 text-sm mt-2 font-medium">Model GPT-4o mini được cấu hình dịch 40 dòng/lượt</p>
+                <p className="text-slate-400 text-sm mt-2 font-medium">Xử lý hàng loạt 40 dòng/lần</p>
               </div>
             </div>
           ) : (
             tasks.map((task) => (
-              <div key={task.id} className={`bg-white p-7 rounded-[2.5rem] shadow-sm border transition-all duration-300 ${task.status === ProcessingStatus.ERROR ? 'border-red-200 bg-red-50/10' : 'border-slate-100 hover:shadow-lg'}`}>
+              <div key={task.id} className={`bg-white p-7 rounded-[2.5rem] shadow-sm border transition-all duration-300 ${task.status === ProcessingStatus.ERROR ? 'border-red-200 bg-red-50/10' : 'border-slate-100 hover:shadow-xl hover:shadow-emerald-500/5'}`}>
                 <div className="flex items-center justify-between gap-4 mb-6">
                   <div className="flex items-center gap-5 min-w-0">
-                    <div className="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-[1.25rem] flex flex-col items-center justify-center font-black text-[9px] shrink-0 border border-emerald-100">
-                      <svg className="w-5 h-5 mb-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                    <div className="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-2xl flex flex-col items-center justify-center font-black text-[9px] shrink-0 border border-emerald-100">
+                      <svg className="w-6 h-6 mb-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
                       SRT
                     </div>
                     <div className="truncate">
                       <h3 className="font-bold text-slate-800 text-lg truncate">{task.fileName}</h3>
-                      <p className="text-slate-400 text-[10px] uppercase font-black tracking-widest mt-1">{task.originalSubs.length} DÒNG PHỤ ĐỀ</p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-slate-400 text-[10px] uppercase font-black tracking-widest">{task.originalSubs.length} DÒNG</span>
+                      </div>
                     </div>
                   </div>
                   
@@ -221,7 +297,7 @@ const App: React.FC = () => {
                     <span className={`px-5 py-2 rounded-full text-[10px] font-black uppercase tracking-widest border ${
                       task.status === ProcessingStatus.COMPLETED ? 'bg-emerald-100 text-emerald-700 border-emerald-200' :
                       task.status === ProcessingStatus.PROCESSING ? 'bg-amber-100 text-amber-700 border-amber-200 animate-pulse' :
-                      task.status === ProcessingStatus.ERROR ? 'bg-red-50 text-red-700 border-red-100' : 'bg-slate-50 text-slate-500 border-slate-100'
+                      task.status === ProcessingStatus.ERROR ? 'bg-red-50 text-red-700 border-red-100' : 'bg-slate-50 text-slate-400 border-slate-100'
                     }`}>
                       {task.status}
                     </span>
@@ -242,12 +318,12 @@ const App: React.FC = () => {
 
                 {task.status === ProcessingStatus.PROCESSING && (
                   <div className="space-y-2 mb-6">
-                    <div className="flex justify-between text-[10px] font-black text-emerald-600 uppercase">
-                      <span>Đang đối chiếu dữ liệu...</span>
+                    <div className="flex justify-between text-[10px] font-black text-emerald-600 uppercase tracking-tighter">
+                      <span>Tiến độ dịch thuật</span>
                       <span>{task.progress}%</span>
                     </div>
-                    <div className="bg-slate-100 h-2.5 rounded-full overflow-hidden shadow-inner">
-                      <div className="bg-emerald-500 h-full rounded-full transition-all duration-700" style={{ width: `${task.progress}%` }} />
+                    <div className="bg-slate-100 h-2 rounded-full overflow-hidden shadow-inner">
+                      <div className="bg-emerald-500 h-full rounded-full transition-all duration-700 ease-out" style={{ width: `${task.progress}%` }} />
                     </div>
                   </div>
                 )}
@@ -258,7 +334,7 @@ const App: React.FC = () => {
                   </div>
                   <input
                     type="text"
-                    placeholder="Gợi ý văn phong: Dịch hài hước, dịch sát nghĩa, phong cách Gen Z..."
+                    placeholder="Gợi ý văn phong (Hài hước, trang trọng, dịch cho trẻ em...)"
                     className="w-full pl-14 pr-6 py-4 bg-slate-50 border border-slate-100 rounded-[1.5rem] text-sm focus:ring-4 focus:ring-emerald-500/10 focus:bg-white outline-none transition-all placeholder:text-slate-300 font-medium"
                     value={task.prompt}
                     onChange={(e) => updateTask(task.id, { prompt: e.target.value })}
@@ -269,7 +345,7 @@ const App: React.FC = () => {
                 {task.error && (
                   <div className="mt-5 p-5 bg-red-50 text-red-600 text-[11px] font-bold rounded-[1.5rem] border border-red-100 flex items-start gap-3">
                     <svg className="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                    <span>{task.error}</span>
+                    <span className="leading-relaxed">{task.error}</span>
                   </div>
                 )}
               </div>
@@ -278,15 +354,15 @@ const App: React.FC = () => {
         </div>
       </div>
       
-      <footer className="mt-16 text-slate-400 font-bold text-[10px] tracking-[0.4em] uppercase flex flex-col items-center gap-4">
+      <footer className="mt-16 text-slate-300 font-bold text-[10px] tracking-[0.4em] uppercase flex flex-col items-center gap-4">
         <div className="flex items-center gap-5">
           <span>GPT-4O MINI</span>
-          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span>
-          <span>STRICT TRANSLATION MODE</span>
-          <span className="w-1.5 h-1.5 bg-slate-300 rounded-full"></span>
-          <span>OPENAI API</span>
+          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>
+          <span>NO-SKIP GUARANTEE</span>
+          <span className="w-1.5 h-1.5 bg-slate-200 rounded-full"></span>
+          <span>SECURE STORAGE</span>
         </div>
-        <div className="text-[9px] opacity-40 text-center font-medium lowercase tracking-normal">Đã loại bỏ cơ chế nghỉ &bull; Ưu tiên tốc độ và độ chính xác dòng</div>
+        <div className="text-[9px] opacity-60 text-center font-medium lowercase tracking-normal text-slate-400">Tất cả dữ liệu được xử lý trực tiếp trên trình duyệt &bull; Không lưu trữ file trên máy chủ</div>
       </footer>
     </div>
   );
