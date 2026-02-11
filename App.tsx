@@ -6,7 +6,7 @@ import { translateSubtitleBatch } from './services/openaiService';
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<FileTask[]>([]);
-  const [apiKey, setApiKey] = useState(import.meta.env.VITE_OPENAI_API_KEY || '');
+  const [apiKey, setApiKey] = useState('');
   const [isGlobalProcessing, setIsGlobalProcessing] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
