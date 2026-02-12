@@ -6,7 +6,7 @@ export async function translateSubtitleBatchGemini(
   subtitles: SubtitleEntry[],
   customPrompt: string,
   apiKey: string,
-  modelName: string = "gemini-3-flash-preview"
+  modelName: string = "gemini-2.5-flash"
 ): Promise<{ id: number; translatedText: string }[]> {
   
   const ai = new GoogleGenAI({ apiKey });

@@ -7,13 +7,6 @@ import { translateSubtitleBatchGemini } from './services/geminiService';
 
 type AIProvider = 'openai' | 'gemini';
 
-// Danh sách Model theo thứ tự ưu tiên của người dùng
-const GEMINI_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
-  'gemini-3-flash-preview'
-];
-
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<FileTask[]>([]);
   const [activeAI, setActiveAI] = useState<AIProvider>(() => {
@@ -25,18 +18,12 @@ const App: React.FC = () => {
   const [draftKeyGPT, setDraftKeyGPT] = useState(activeKeyGPT);
   const [gptVersion, setGptVersion] = useState(0);
 
-  // Gemini Keys (3 keys)
-  const [activeKeysGemini, setActiveKeysGemini] = useState<string[]>(() => {
-    return [
-      localStorage.getItem('gemini_api_key_0') || '',
-      localStorage.getItem('gemini_api_key_1') || '',
-      localStorage.getItem('gemini_api_key_2') || ''
-    ];
-  });
-  const [draftKeysGemini, setDraftKeysGemini] = useState<string[]>([...activeKeysGemini]);
+  // Gemini Key (Single Key)
+  const [activeKeyGemini, setActiveKeyGemini] = useState(() => localStorage.getItem('gemini_api_key') || '');
+  const [draftKeyGemini, setDraftKeyGemini] = useState(activeKeyGemini);
   const [geminiVersion, setGeminiVersion] = useState(0);
 
-  const [showKeys, setShowKeys] = useState({ gpt: false, gemini: [false, false, false] });
+  const [showKeys, setShowKeys] = useState({ gpt: false, gemini: false });
   const [showSettings, setShowSettings] = useState(false);
   const [isGlobalProcessing, setIsGlobalProcessing] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -53,9 +40,9 @@ const App: React.FC = () => {
   };
 
   const handleSaveGemini = () => {
-    setActiveKeysGemini([...draftKeysGemini]);
-    draftKeysGemini.forEach((key, i) => localStorage.setItem(`gemini_api_key_${i}`, key));
-    alert('Đã cập nhật 3 Gemini Keys!');
+    setActiveKeyGemini(draftKeyGemini);
+    localStorage.setItem('gemini_api_key', draftKeyGemini);
+    alert('Đã cập nhật Gemini Key!');
   };
 
   const handleClearGPT = () => {
@@ -68,10 +55,10 @@ const App: React.FC = () => {
   };
 
   const handleClearGemini = () => {
-    if (confirm('Xóa sạch toàn bộ 3 Gemini Keys?')) {
-      [0, 1, 2].forEach(i => localStorage.removeItem(`gemini_api_key_${i}`));
-      setActiveKeysGemini(['', '', '']);
-      setDraftKeysGemini(['', '', '']);
+    if (confirm('Xóa sạch Gemini Key?')) {
+      localStorage.removeItem('gemini_api_key');
+      setActiveKeyGemini('');
+      setDraftKeyGemini('');
       setGeminiVersion(v => v + 1);
     }
   };
@@ -122,10 +109,6 @@ const App: React.FC = () => {
 
     updateTask(task.id, { status: ProcessingStatus.PROCESSING, progress: 0, error: undefined });
 
-    // BIẾN QUAN TRỌNG: Lưu vị trí Key và Model đang dùng ổn định
-    let currentKIdx = 0;
-    let currentMIdx = 0;
-
     try {
       const results: SubtitleEntry[] = task.originalSubs.map(s => ({ ...s }));
       const BATCH_SIZE = 40;
@@ -133,8 +116,6 @@ const App: React.FC = () => {
       
       for (let i = 0; i < total; i += BATCH_SIZE) {
         const batch = task.originalSubs.slice(i, i + BATCH_SIZE);
-        let success = false;
-        let lastError = '';
 
         if (activeAI === 'openai') {
           if (!activeKeyGPT) throw new Error("Chưa nhập OpenAI Key");
@@ -143,46 +124,15 @@ const App: React.FC = () => {
             const idx = results.findIndex(r => r.id === t.id);
             if (idx !== -1) results[idx].text = t.translatedText;
           });
-          success = true;
         } else {
-          // GEMINI ROTATION LOGIC (FIXED)
-          const availableKeys = activeKeysGemini.filter(k => k.trim() !== '');
-          if (availableKeys.length === 0) throw new Error("Vui lòng nhập ít nhất 1 Gemini Key");
-
-          // Vòng lặp thử Key (bắt đầu từ currentKIdx thay vì 0)
-          keyLoop: for (let k = currentKIdx; k < activeKeysGemini.length; k++) {
-            const key = activeKeysGemini[k];
-            if (!key) {
-               currentKIdx++; // Nhảy sang key tiếp theo nếu rỗng
-               continue;
-            }
-
-            // Vòng lặp thử Model (bắt đầu từ currentMIdx thay vì 0)
-            for (let m = (k === currentKIdx ? currentMIdx : 0); m < GEMINI_MODELS.length; m++) {
-              const modelName = GEMINI_MODELS[m];
-              try {
-                console.log(`Tiến trình: Batch ${Math.floor(i/BATCH_SIZE) + 1} đang dùng Key #${k + 1} - Model: ${modelName}`);
-                const translated = await translateSubtitleBatchGemini(batch, task.prompt, key, modelName);
-                
-                translated.forEach(t => {
-                  const idx = results.findIndex(r => r.id === t.id);
-                  if (idx !== -1) results[idx].text = t.translatedText;
-                });
-                
-                // CẬP NHẬT CON TRỎ: Lưu lại vị trí thành công để batch sau dùng luôn
-                currentKIdx = k;
-                currentMIdx = m;
-                success = true;
-                break keyLoop; 
-              } catch (err: any) {
-                lastError = err.message;
-                console.warn(`Lỗi 429/Quota tại Key #${k+1} [${modelName}]. Chuyển model/key...`);
-              }
-            }
-          }
+          if (!activeKeyGemini) throw new Error("Chưa nhập Gemini Key");
+          // Chỉ sử dụng gemini-2.5-flash
+          const translated = await translateSubtitleBatchGemini(batch, task.prompt, activeKeyGemini, 'gemini-2.5-flash');
+          translated.forEach(t => {
+            const idx = results.findIndex(r => r.id === t.id);
+            if (idx !== -1) results[idx].text = t.translatedText;
+          });
         }
-
-        if (!success) throw new Error(`Toàn bộ hệ thống cạn kiệt hạn mức. Lỗi cuối: ${lastError}`);
 
         updateTask(task.id, { 
           progress: Math.floor(((i + BATCH_SIZE) / total) * 100),
@@ -207,8 +157,6 @@ const App: React.FC = () => {
     setIsGlobalProcessing(false);
   };
 
-  const accentColor = activeAI === 'openai' ? 'emerald' : 'indigo';
-
   return (
     <div className="min-h-screen bg-[#fcfdfd] text-slate-800 py-12 px-4 font-sans selection:bg-indigo-100 transition-colors duration-500">
       <div className="max-w-4xl mx-auto space-y-8">
@@ -217,9 +165,9 @@ const App: React.FC = () => {
         <div className="bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm flex flex-col md:flex-row items-center justify-between gap-6">
           <div className="text-center md:text-left">
             <h1 className="text-3xl font-black tracking-tighter">
-              <span className={activeAI === 'openai' ? 'text-emerald-600' : 'text-indigo-600'}>GEMINI</span> FARMER
+              <span className={activeAI === 'openai' ? 'text-emerald-600' : 'text-indigo-600'}>GEMINI</span> TRANSLATOR
             </h1>
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Stateful 3x3 Rotation Logic</p>
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Direct gemini-2.5-flash Mode</p>
           </div>
 
           <div className="flex items-center gap-3">
@@ -276,52 +224,36 @@ const App: React.FC = () => {
 
             <div className="space-y-6">
               <div className="flex justify-between items-center">
-                <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Gemini Keys & Rotation (3 API Keys)</span>
-                <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">Remembering active combos</span>
+                <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Gemini Configuration</span>
+                {activeKeyGemini && <span className="text-[9px] text-indigo-500 font-bold tracking-widest">● ACTIVE</span>}
               </div>
               
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {[0, 1, 2].map((i) => (
-                  <div key={`gem-box-${i}-${geminiVersion}`} className="space-y-3">
-                    <div className="flex justify-between text-[9px] font-black text-slate-400 uppercase">
-                      <span>Project #{i + 1}</span>
-                      {activeKeysGemini[i] && <span className="text-indigo-500 flex items-center gap-1 animate-pulse"><span className="w-1.5 h-1.5 bg-indigo-500 rounded-full"></span> Ready</span>}
-                    </div>
-                    <div className="relative">
-                      <input
-                        type={showKeys.gemini[i] ? "text" : "password"}
-                        placeholder={`Gemini API Key ${i+1}`}
-                        className="w-full bg-slate-50 border border-slate-100 px-3 py-3 rounded-xl text-[10px] font-mono outline-none focus:bg-white focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                        value={draftKeysGemini[i]}
-                        onChange={(e) => {
-                          const newKeys = [...draftKeysGemini];
-                          newKeys[i] = e.target.value;
-                          setDraftKeysGemini(newKeys);
-                        }}
-                      />
-                      <button 
-                        onClick={() => {
-                          const newVisible = [...showKeys.gemini];
-                          newVisible[i] = !newVisible[i];
-                          setShowKeys(p => ({...p, gemini: newVisible}));
-                        }}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
-                      </button>
-                    </div>
-                  </div>
-                ))}
+              <div className="space-y-3">
+                <div className="relative flex gap-2">
+                  <input
+                    key={`gem-v${geminiVersion}`}
+                    type={showKeys.gemini ? "text" : "password"}
+                    placeholder="Paste Gemini API Key..."
+                    className="flex-1 bg-slate-50 border border-slate-100 px-4 py-3 rounded-xl text-xs font-mono outline-none focus:bg-white focus:ring-2 focus:ring-indigo-500/10 transition-all"
+                    value={draftKeyGemini}
+                    onChange={(e) => setDraftKeyGemini(e.target.value)}
+                  />
+                  <button 
+                    onClick={() => setShowKeys(p => ({...p, gemini: !p.gemini}))}
+                    className="p-3 text-slate-300 hover:text-slate-500"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                  </button>
+                </div>
               </div>
               
               <div className="flex gap-2">
-                <button onClick={handleSaveGemini} className="flex-1 bg-indigo-600 text-white py-3 rounded-xl text-[10px] font-bold uppercase tracking-wider shadow-lg shadow-indigo-50 hover:bg-indigo-700 transition-all">Update All Keys</button>
-                <button onClick={handleClearGemini} className="px-6 py-3 text-red-500 border border-red-100 rounded-xl text-[10px] font-bold uppercase hover:bg-red-50">Clear All</button>
+                <button onClick={handleSaveGemini} className="flex-1 bg-indigo-600 text-white py-3 rounded-xl text-[10px] font-bold uppercase tracking-wider shadow-lg shadow-indigo-50 hover:bg-indigo-700 transition-all">Update Gemini Key</button>
+                <button onClick={handleClearGemini} className="px-6 py-3 text-red-500 border border-red-100 rounded-xl text-[10px] font-bold uppercase hover:bg-red-50">Clear</button>
               </div>
               
               <div className="p-5 bg-indigo-50/50 rounded-2xl border border-indigo-100 text-[10px] text-indigo-700 leading-relaxed font-medium">
-                <p><strong>Cơ chế ghi nhớ:</strong> Hệ thống sẽ ghi nhớ tổ hợp đang hoạt động tốt. <br/> 
-                Nếu Key 1/Model 2.5 Flash hết hạn mức, batch tiếp theo sẽ bắt đầu <strong>ngay lập tức</strong> từ Key 1/Model 2.5 Pro, không thử lại tổ hợp đã hỏng giúp tiết kiệm thời gian.</p>
+                <p>Hệ thống hiện đang sử dụng model <strong>gemini-2.5-flash</strong> cố định để dịch. Vui lòng đảm bảo API Key của bạn có quyền truy cập vào model này.</p>
               </div>
             </div>
           </div>
@@ -385,7 +317,7 @@ const App: React.FC = () => {
                   {task.status === ProcessingStatus.PROCESSING && (
                     <div className="mb-4 space-y-2">
                       <div className="flex justify-between text-[9px] font-black text-indigo-600 uppercase">
-                        <span>Smart Multi-Key Processing...</span>
+                        <span>Gemini Processing...</span>
                         <span>{task.progress}%</span>
                       </div>
                       <div className="h-1 bg-slate-100 rounded-full overflow-hidden">
@@ -405,7 +337,7 @@ const App: React.FC = () => {
 
                   {task.error && (
                     <div className="mt-3 p-3 bg-red-50 text-red-600 text-[9px] font-bold rounded-xl border border-red-100">
-                      Lỗi cuối cùng: {task.error}
+                      Lỗi: {task.error}
                     </div>
                   )}
                 </div>
@@ -415,7 +347,7 @@ const App: React.FC = () => {
         </div>
       </div>
       <footer className="mt-20 text-center text-[9px] text-slate-400 font-black uppercase tracking-[0.4em] pb-12">
-        Smart Rotation Logic Active
+        Powered by Gemini 2.5 Flash
       </footer>
     </div>
   );
